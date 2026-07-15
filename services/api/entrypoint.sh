@@ -9,5 +9,7 @@ alembic upgrade head
 echo "Seeding default data (admin user, demo customers)..."
 python -m app.scripts.seed || echo "seed: non-fatal failure, continuing"
 
-echo "Starting API on 0.0.0.0:8000"
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers
+# Railway (and other PaaS) inject $PORT; fall back to 8000 for local/compose.
+PORT="${PORT:-8000}"
+echo "Starting API on 0.0.0.0:${PORT}"
+exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT}" --proxy-headers

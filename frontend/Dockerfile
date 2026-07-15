@@ -12,5 +12,11 @@ RUN npm run build
 
 FROM nginx:1.27-alpine AS runtime
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Rendered by the nginx image's envsubst entrypoint at startup so the server
+# binds to $PORT (Railway injects it; defaults to 80 for local/compose).
+# NGINX_ENVSUBST_FILTER limits substitution to PORT so nginx runtime vars
+# like $uri and $host are left untouched.
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+ENV PORT=80 \
+    NGINX_ENVSUBST_FILTER=PORT
 EXPOSE 80

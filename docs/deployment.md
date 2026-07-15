@@ -40,6 +40,47 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
 Caddy is the only container that should publish host ports (`80`/`443`). For a hardened deploy, drop the `ports:` blocks for `api`, `bridge`, and `frontend` from `docker-compose.yml` (or override them) so those services are reachable only on the internal compose network, and restrict `443` inbound on the telephony path to Tata's published egress CIDRs.
 
+### Render (Blueprint — recommended)
+
+The repo ships a [`render.yaml`](../render.yaml) Blueprint that provisions the whole stack in one step. In the Render dashboard: **New + → Blueprint → select this repo**. Render reads `render.yaml` and creates:
+
+| Resource | Type | Root dir | Notes |
+|---|---|---|---|
+| `voicebot-db` | Postgres | — | `free` plan (upgrade to `basic-256mb`; free expires in 30 days) |
+| `voicebot-kv` | Key Value (Redis) | — | internal-only (`ipAllowList: []`) |
+| `voicebot-api` | web (docker) | `services/api` | runs migrations on boot; `/healthz` |
+| `voicebot-bridge` | web (docker) | `services/bridge` | Tata WSS audio; `9090` metrics stays private |
+| `voicebot-worker` | worker (docker) | `services/worker` | background dialer, no public port |
+| `voicebot-frontend` | web (docker) | `frontend` | nginx SPA |
+
+How it wires together:
+
+- **Secrets are prompted once.** Everything marked `sync: false` (`OPENAI_API_KEY`, `TATA_*`, `VITE_API_URL`, `FRONTEND_PUBLIC_URL`, `BRIDGE_PUBLIC_WS_URL`) is asked for during Blueprint creation. `SERVICE_TOKEN`, `JWT_SECRET`, and `ADMIN_PASSWORD` are auto-generated (`generateValue`) — grab the admin password from the dashboard and rotate it.
+- **Managed Postgres/Redis are auto-linked** via `fromDatabase` / `fromService`. The api normalizes Render's `postgresql://` string to the async `+asyncpg` driver automatically (see `services/api/app/config.py`).
+- **`$PORT` binding**: Render injects `PORT`. The api's entrypoint and the bridge's `dockerCommand` bind it; the frontend's nginx binds it via the image's `envsubst` template. `PORT` is pinned to `8000`/`8080` for the api/bridge so the private-network URL `http://voicebot-api:8000` is stable.
+- **Two-pass secrets**: on first deploy you won't yet know the public URLs. Deploy once, then set `VITE_API_URL` (→ api's `onrender.com` URL, triggers a frontend rebuild), `FRONTEND_PUBLIC_URL` (→ frontend URL, for CORS), and `BRIDGE_PUBLIC_WS_URL` (→ `wss://<bridge>.onrender.com/v1/telephony/tata`).
+- `mock_telephony` is intentionally excluded — it's a local dev demo only.
+
+### Railway (monorepo)
+
+This repo is a monorepo, so Railway must build **one service per subdirectory** — pointing a service at the repo root fails because the root has no `Dockerfile`/`requirements.txt` for Railpack to detect.
+
+For each service, create a Railway service from this GitHub repo and set **Settings → Build → Root Directory**:
+
+| Railway service | Root Directory | Public port |
+|---|---|---|
+| bridge | `services/bridge` | app binds `$PORT` (Tata WSS audio); `9090` metrics stays private |
+| api | `services/api` | app binds `$PORT` |
+| worker | `services/worker` | none (background process — leave unexposed) |
+| frontend | `frontend` | nginx binds `$PORT` |
+
+Each of those folders ships a `railway.json` that pins the Docker builder and restart policy, so once the root directory is set the build is reproducible. Notes:
+
+- **Bind to `$PORT`, not a fixed port.** Railway injects `PORT` at runtime; the services read it (bridge/api via their start command, frontend via nginx's `envsubst` template) and fall back to their compose ports (`8080`/`8000`/`80`) locally.
+- **Set env vars per service** in the Variables tab — same variables as the Compose `environment:` blocks (`JWT_SECRET`, `SERVICE_TOKEN`, `OPENAI_API_KEY`, `TATA_*`, `DATABASE_URL`, `REDIS_URL`, etc.). Use Railway's Postgres and Redis plugins and reference them with `${{Postgres.DATABASE_URL}}` / `${{Redis.REDIS_URL}}`.
+- **Wire internal URLs** (`API_INTERNAL_URL`, `BRIDGE_PUBLIC_WS_URL`) to the services' Railway private-network hostnames.
+- The `mock_telephony` service is a local browser-mic demo only — do not deploy it.
+
 ### Per-service notes
 
 #### bridge
